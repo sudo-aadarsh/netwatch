@@ -76,6 +76,7 @@ REAL_ONLY_MODE = os.getenv("NETWATCH_REAL_ONLY", "1").strip().lower() not in {"0
 FAIL_CLOSED_MODE = os.getenv("NETWATCH_FAIL_CLOSED", "1").strip().lower() not in {"0", "false", "no"}
 ATLAS_POLL_SECONDS = int(os.getenv("NETWATCH_ATLAS_POLL_SECONDS", "30"))
 LATENCY_BROADCAST_SECONDS = int(os.getenv("NETWATCH_LATENCY_BROADCAST_SECONDS", "2"))
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
 class LatencyTracker:
     def __init__(self, route_id: str, base: float):
@@ -256,6 +257,21 @@ async def broadcast(payload: dict):
 
 # ─── Background tasks ─────────────────────────────────────────────────────────
 
+async def send_slack_alert(session: aiohttp.ClientSession, anomaly: dict):
+    if not SLACK_WEBHOOK_URL:
+        log.info("SLACK_WEBHOOK_URL not set; skipping alert for %s", anomaly["route_id"])
+        return
+    
+    payload = {
+        "text": f"🚨 *Network Anomaly Detected* 🚨\n*Route*: {anomaly['route_id']}\n*Latency*: {anomaly['latency']}ms (EWMA: {anomaly['ewma']}ms)\n*Z-Score*: {anomaly['z_score']}σ"
+    }
+    try:
+        async with session.post(SLACK_WEBHOOK_URL, json=payload, timeout=5) as resp:
+            if resp.status != 200:
+                log.warning("Slack alert failed with status %s", resp.status)
+    except Exception as e:
+        log.warning("Slack alert exception: %s", e)
+
 async def latency_update_loop():
     """
     Main data loop — runs every 2 seconds.
@@ -327,6 +343,9 @@ async def latency_update_loop():
 
             if anomalies:
                 log.info("Anomalies detected: %s", [a["route_id"] for a in anomalies])
+                for a in anomalies:
+                    if a["z_score"] > 3.0:
+                        asyncio.create_task(send_slack_alert(session, a))
 
 async def bgp_stream_loop():
     """
@@ -392,6 +411,67 @@ async def bgp_stream_loop():
             log.warning("RIPE RIS disconnected: %s — reconnecting in 8s", e)
         await asyncio.sleep(8)
 
+geoip_cache = {}
+
+async def get_geoip(session: aiohttp.ClientSession, ip: str):
+    if ip in geoip_cache:
+        return geoip_cache[ip]
+    try:
+        async with session.get(f"http://ip-api.com/json/{ip}", timeout=3) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get("status") == "success":
+                    coords = {"lat": data["lat"], "lon": data["lon"]}
+                    geoip_cache[ip] = coords
+                    return coords
+    except Exception:
+        pass
+    return None
+
+async def traceroute_loop():
+    """Fetch traceroutes and broadcast physical paths."""
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{RIPE_BASE}/measurements/?type=traceroute&status=2&limit=5&format=json"
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        measurements = data.get("results", [])
+                        if measurements:
+                            meas_id = measurements[0]["id"]
+                            res_url = f"{RIPE_BASE}/measurements/{meas_id}/results/?limit=5&format=json"
+                            async with session.get(res_url, timeout=10) as r2:
+                                if r2.status == 200:
+                                    results = await r2.json()
+                                    for res in results:
+                                        if not isinstance(res, dict): continue
+                                        ips = []
+                                        for hop in res.get("result", []):
+                                            if "result" in hop and len(hop["result"]) > 0:
+                                                ip = hop["result"][0].get("from")
+                                                if ip and ip not in ips:
+                                                    ips.append(ip)
+                                        coords = []
+                                        for ip in ips:
+                                            c = await get_geoip(session, ip)
+                                            if c:
+                                                coords.append(c)
+                                            await asyncio.sleep(1.5) # rate limit ip-api 45/min
+                                        
+                                        if len(coords) >= 2:
+                                            route = random.choice(ROUTES)
+                                            await broadcast({
+                                                "type": "traceroute_path",
+                                                "route_id": route["id"],
+                                                "path": coords
+                                            })
+                                            break # Just one per cycle to avoid ip-api rate limit
+        except Exception as e:
+            log.warning("Traceroute loop error: %s", e)
+        
+        await asyncio.sleep(60) # run every 60s
+
 # ─── FastAPI app ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -405,6 +485,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(latency_update_loop(), name="latency_loop"),
         asyncio.create_task(bgp_stream_loop(),     name="bgp_stream"),
+        asyncio.create_task(traceroute_loop(),     name="traceroute_loop"),
     ]
     yield
     for t in tasks:
@@ -538,7 +619,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=os.getenv("NETWATCH_RELOAD", "0").strip().lower() in {"1", "true", "yes"},
         log_level="info",
     )

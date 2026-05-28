@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import * as THREE from "three";
+import LatencyChart from "./LatencyChart";
 
 // ═══════════════════════════════════════════════════════════════════════
 // CONSTANTS & DATA
@@ -195,12 +196,27 @@ export default function App() {
 
     // Lighting
     scene.add(new THREE.AmbientLight(0xffffff, 0.12));
-    const sun = new THREE.DirectionalLight(0x99ddff, 1.6);
-    sun.position.set(20, 8, 12);
+    const sun = new THREE.DirectionalLight(0xffffff, 2.0);
     scene.add(sun);
     const rim = new THREE.DirectionalLight(0x00e5cc, 0.35);
     rim.position.set(-18, 0, -8);
     scene.add(rim);
+
+    const updateSunPosition = () => {
+      const now = new Date();
+      const start = new Date(now.getUTCFullYear(), 0, 0);
+      const dayOfYear = Math.floor((now - start) / (1000 * 60 * 60 * 24));
+      
+      // Solar declination (approximate)
+      const declination = -23.44 * Math.cos((360 / 365) * (dayOfYear + 10) * (Math.PI / 180));
+      
+      // Sun longitude based on UTC time
+      const utcHours = now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
+      const sunLon = (12 - utcHours) * 15;
+      
+      const sunPos = ll2v3(declination, sunLon, 30);
+      sun.position.copy(sunPos);
+    };
 
     // ── Stars ──
     {
@@ -347,6 +363,8 @@ export default function App() {
       last = ts;
 
       if (autoRot.current) globe.rotation.y += 0.0012;
+      
+      updateSunPosition();
 
       // Pulse node halos
       nodeGroup.children.forEach(m => {
@@ -519,6 +537,29 @@ export default function App() {
         return;
       }
 
+      if (msg.type === "traceroute_path" && msg.path && msg.route_id) {
+        let curvePts = [];
+        if (msg.path.length >= 2) {
+           for (let i = 0; i < msg.path.length - 1; i++) {
+              const segPts = buildArcPoints(
+                 {lat: msg.path[i].lat, lon: msg.path[i].lon}, 
+                 {lat: msg.path[i+1].lat, lon: msg.path[i+1].lon}, 
+                 30
+              );
+              curvePts.push(...segPts);
+           }
+        }
+        
+        if (curvePts.length > 0) {
+            const geo = new THREE.SphereGeometry(0.08, 6, 6);
+            const mat = new THREE.MeshBasicMaterial({color: 0xffaaff, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending});
+            const mesh = new THREE.Mesh(geo, mat);
+            pktGroup.add(mesh);
+            packetPool.current.push({ routeId: msg.route_id, progress: 0, speed: 0.08, mesh, pts: curvePts });
+        }
+        return;
+      }
+
       if (msg.type === "route_change" && msg.route_id) {
         triggerAnomaly(msg.route_id, msg.latency, true);
         const asPath = msg.bgp_event?.as_path;
@@ -553,7 +594,7 @@ export default function App() {
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       const candidates = [
         `${scheme}://${window.location.host}/ws`,
-        `${scheme}://localhost:8000/ws`,
+        `${scheme}://localhost:8001/ws`,
       ];
       setWsState("CONNECTING");
 
@@ -819,6 +860,7 @@ export default function App() {
               <div style={{marginTop:10,fontSize:7,opacity:0.25,letterSpacing:1}}>
                 ANOMALY DETECTION: EWMA α=0.3 · Z-SCORE THRESHOLD 2.0σ
               </div>
+              <LatencyChart routeId={selRoute} />
             </div>
             <div style={{textAlign:"right",marginLeft:24,flexShrink:0}}>
               <div style={{color:latStr(lats[selRoute]||selRouteData.base),fontSize:26,fontWeight:"bold",lineHeight:1}}>
