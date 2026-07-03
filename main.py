@@ -26,6 +26,8 @@ from typing import Optional
 import aiohttp
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -184,7 +186,8 @@ async def fetch_ripe_latencies(session: aiohttp.ClientSession) -> dict[str, floa
     try:
         # Use RIPE Atlas built-in measurements (ongoing public measurements)
         url = f"{RIPE_BASE}/measurements/?type=ping&status=2&limit=20&format=json"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        headers = {"User-Agent": "NetWatch/1.0"}
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=25)) as resp:
             if resp.status != 200:
                 return {}
             data = await resp.json()
@@ -195,7 +198,7 @@ async def fetch_ripe_latencies(session: aiohttp.ClientSession) -> dict[str, floa
             # Collect RTT samples from the first measurement
             meas_id = measurements[0]["id"]
             res_url = f"{RIPE_BASE}/measurements/{meas_id}/results/?limit=50&format=json"
-            async with session.get(res_url, timeout=aiohttp.ClientTimeout(total=15)) as r2:
+            async with session.get(res_url, headers=headers, timeout=aiohttp.ClientTimeout(total=25)) as r2:
                 if r2.status != 200:
                     return {}
                 results_payload = await r2.json()
@@ -235,6 +238,9 @@ async def fetch_ripe_latencies(session: aiohttp.ClientSession) -> dict[str, floa
                 calibrated[route["id"]] = route["base"] * calibration_factor
             return calibrated
 
+    except asyncio.TimeoutError:
+        log.warning("RIPE Atlas fetch timed out.")
+        return {}
     except Exception as e:
         log.warning("RIPE Atlas fetch failed: %r", e)
         return {}
@@ -452,14 +458,15 @@ async def traceroute_loop():
         try:
             async with aiohttp.ClientSession() as session:
                 url = f"{RIPE_BASE}/measurements/?type=traceroute&status=2&limit=5&format=json"
-                async with session.get(url, timeout=10) as resp:
+                headers = {"User-Agent": "NetWatch/1.0"}
+                async with session.get(url, headers=headers, timeout=25) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         measurements = data.get("results", [])
                         if measurements:
                             meas_id = measurements[0]["id"]
                             res_url = f"{RIPE_BASE}/measurements/{meas_id}/results/?limit=5&format=json"
-                            async with session.get(res_url, timeout=10) as r2:
+                            async with session.get(res_url, headers=headers, timeout=25) as r2:
                                 if r2.status == 200:
                                     results = await r2.json()
                                     for res in results:
@@ -485,12 +492,32 @@ async def traceroute_loop():
                                                 "path": coords
                                             })
                                             break # Just one per cycle to avoid ip-api rate limit
+        except asyncio.TimeoutError:
+            log.warning("Traceroute loop timed out.")
         except Exception as e:
-            log.warning("Traceroute loop error: %s", e)
+            log.warning("Traceroute loop error: %r", e)
         
         await asyncio.sleep(60) # run every 60s
 
 # ─── FastAPI app ──────────────────────────────────────────────────────────────
+
+async def keepalive_loop():
+    """Ping own endpoint every 36 hours to prevent sleeping (requires EXTERNAL_URL)."""
+    while True:
+        await asyncio.sleep(129600)  # 36 hours
+        try:
+            port = int(os.getenv("PORT", 7860))
+            # Fallback to localhost, but external URL is needed to reset external proxies
+            url = os.getenv("EXTERNAL_URL", f"http://127.0.0.1:{port}")
+            if not url.endswith("/api/stats"):
+                url = url.rstrip("/") + "/api/stats"
+                
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    log.info("Keepalive ping: %s", resp.status)
+        except Exception as e:
+            log.warning("Keepalive failed: %s", e)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -504,6 +531,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(latency_update_loop(), name="latency_loop"),
         asyncio.create_task(bgp_stream_loop(),     name="bgp_stream"),
         asyncio.create_task(traceroute_loop(),     name="traceroute_loop"),
+        asyncio.create_task(keepalive_loop(),      name="keepalive_loop"),
     ]
     yield
     for t in tasks:
@@ -633,11 +661,30 @@ async def websocket_endpoint(ws: WebSocket):
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
+
+# Serve compiled React frontend
+frontend_dist = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+
+if os.path.isdir(frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+    
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        if full_path == "" or full_path == "/":
+            return FileResponse(os.path.join(frontend_dist, "index.html"))
+        
+        file_path = os.path.join(frontend_dist, full_path)
+        if os.path.isfile(file_path):
+            return FileResponse(file_path)
+            
+        # Fallback to index.html for SPA routing
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8001,
+        port=int(os.getenv("PORT", 8001)),
         reload=os.getenv("NETWATCH_RELOAD", "0").strip().lower() in {"1", "true", "yes"},
         log_level="info",
     )

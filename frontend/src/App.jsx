@@ -5887,10 +5887,13 @@ export default function App() {
 
     const connectBackend = () => {
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-      const candidates = [
-        `${scheme}://${window.location.host}/ws`,
-        `${scheme}://localhost:8001/ws`,
-      ];
+      const candidates = [];
+      if (import.meta.env.VITE_BACKEND_WS_URL) {
+        candidates.push(import.meta.env.VITE_BACKEND_WS_URL);
+      } else {
+        candidates.push(`${scheme}://${window.location.host}/ws`);
+        candidates.push(`${scheme}://localhost:8001/ws`);
+      }
       setWsState("CONNECTING");
 
       let idx = 0;

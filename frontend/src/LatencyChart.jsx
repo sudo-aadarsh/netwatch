@@ -30,9 +30,15 @@ export default function LatencyChart({ routeId }) {
     const fetchHistory = async () => {
       setLoading(true);
       try {
-        const port = window.location.port === "5173" ? 8001 : window.location.port;
-        const host = window.location.hostname;
-        const res = await fetch(`http://${host}:${port}/api/history/${routeId}`);
+        let url;
+        if (import.meta.env.VITE_BACKEND_HTTP_URL) {
+          url = `${import.meta.env.VITE_BACKEND_HTTP_URL}/api/history/${routeId}`;
+        } else {
+          const port = window.location.port === "5173" ? 8001 : window.location.port;
+          const host = window.location.hostname;
+          url = `http://${host}:${port}/api/history/${routeId}`;
+        }
+        const res = await fetch(url);
         const data = await res.json();
         if (active) {
           // data.history is ordered DESC, so reverse it for the chart
