@@ -5242,8 +5242,13 @@ export default function App() {
   const anomCntRef = useRef(0);
   const dragging = useRef(false);
   const prevMX = useRef({ x: 0, y: 0 });
-  const autoRot = useRef(true);
+  const autoRot = useRef(false);
+  const globalAutoRot = useRef(false);
+  const targetCamZ = useRef(null);
+  const targetRot = useRef(null);
   const topoScript = useRef(null);
+
+
 
   const [lats, setLats] = useState(
     Object.fromEntries(ROUTES.map((r) => [r.id, r.base])),
@@ -5254,6 +5259,7 @@ export default function App() {
   const [stats, setStats] = useState({ total: 0, anom: 0, avg: 75, active: 0 });
   const [selRoute, setSelRoute] = useState(null);
   const [selNode, setSelNode] = useState(null);
+  const [isAutoRotate, setIsAutoRotate] = useState(false);
   const [clock, setClock] = useState("");
   const [wsState, setWsState] = useState("CONNECTING");
   const [dataMode, setDataMode] = useState("DISCONNECTED");
@@ -5261,12 +5267,14 @@ export default function App() {
   const tooltipRef = useRef(null);
   const mousePosRef = useRef({ x: 0, y: 0 });
   const [searchTerm, setSearchTerm] = useState("");
+  const searchTimeoutRef = useRef(null);
   const searchTermRef = useRef("");
   const ignoreSearchChangeRef = useRef(false);
   useEffect(() => {
     searchTermRef.current = searchTerm;
   }, [searchTerm]);
   const [searchResults, setSearchResults] = useState([]);
+  const [mobileViewMode, setMobileViewMode] = useState("hidden");
 
   // ── THREE.JS SETUP ───────────────────────────────────────────────────
   useEffect(() => {
@@ -5286,7 +5294,7 @@ export default function App() {
     const scene = new THREE.Scene();
     sceneRef.current = scene;
     const camera = new THREE.PerspectiveCamera(48, W / H, 0.1, 500);
-    camera.position.z = 14;
+    camera.position.z = W < H ? 26 : 14;
     camRef.current = camera;
 
     // Lighting
@@ -5498,13 +5506,41 @@ export default function App() {
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
     let currentHover = null;
+    let pointerDownOnCanvas = false;
 
     const onDown = (e) => {
+      if (!e.isPrimary) return;
+      pointerDownOnCanvas = true;
       dragging.current = true;
       autoRot.current = false;
+      targetRot.current = null;
       prevMX.current = { x: e.clientX, y: e.clientY };
+      if (currentHover) {
+        currentHover = null;
+        setHoveredNodeId(null);
+      }
     };
     const onMove = (e) => {
+      if (dragging.current && e.isPrimary) {
+        const dx = e.clientX - prevMX.current.x,
+          dy = e.clientY - prevMX.current.y;
+        globe.rotation.y += dx * 0.005;
+        globe.rotation.x = Math.max(
+          -1.1,
+          Math.min(1.1, globe.rotation.x + dy * 0.003),
+        );
+        prevMX.current = { x: e.clientX, y: e.clientY };
+        return;
+      }
+
+      if (!el.contains(e.target)) {
+        if (currentHover) {
+          currentHover = null;
+          setHoveredNodeId(null);
+        }
+        return;
+      }
+
       mousePosRef.current = { x: e.clientX, y: e.clientY };
       const rect = el.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -5529,27 +5565,42 @@ export default function App() {
         tooltipRef.current.style.left = e.clientX + 15 + "px";
         tooltipRef.current.style.top = e.clientY + 15 + "px";
       }
-
-      if (!dragging.current) return;
-      const dx = e.clientX - prevMX.current.x,
-        dy = e.clientY - prevMX.current.y;
-      globe.rotation.y += dx * 0.005;
-      globe.rotation.x = Math.max(
-        -1.1,
-        Math.min(1.1, globe.rotation.x + dy * 0.003),
-      );
-      prevMX.current = { x: e.clientX, y: e.clientY };
     };
-    const onUp = () => {
+    const onUp = (e) => {
       dragging.current = false;
       setTimeout(() => {
-        autoRot.current = true;
+        if (globalAutoRot.current) autoRot.current = true;
       }, 2500);
+      if (!pointerDownOnCanvas) return;
+      pointerDownOnCanvas = false;
+      if (e && e.isPrimary) {
+        const dx = e.clientX - prevMX.current.x;
+        const dy = e.clientY - prevMX.current.y;
+        if (Math.hypot(dx, dy) < 5) {
+          const rect = el.getBoundingClientRect();
+          mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          const intersects = raycaster.intersectObjects(nodeGroup.children);
+          let found = false;
+          for (let i = 0; i < intersects.length; i++) {
+            if (intersects[i].object.userData.nodeId) {
+              window.dispatchEvent(new CustomEvent("globe-node-click", { detail: intersects[i].object.userData.nodeId }));
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            window.dispatchEvent(new CustomEvent("globe-bg-click"));
+          }
+        }
+      }
     };
     const onWheel = (e) => {
+      targetCamZ.current = null;
       camera.position.z = Math.max(
         8,
-        Math.min(22, camera.position.z + e.deltaY * 0.018),
+        Math.min(35, camera.position.z + e.deltaY * 0.018),
       );
     };
     const onResize = () => {
@@ -5559,11 +5610,39 @@ export default function App() {
       camera.aspect = W / H;
       camera.updateProjectionMatrix();
     };
-    el.addEventListener("mousedown", onDown);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    el.addEventListener("pointerdown", onDown);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
     el.addEventListener("wheel", onWheel, { passive: true });
     window.addEventListener("resize", onResize);
+
+    let initialPinchDist = null;
+    let initialCamZ = null;
+    const onTouchStart = (e) => {
+      targetCamZ.current = null;
+      targetRot.current = null;
+      if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        initialPinchDist = Math.hypot(dx, dy);
+        initialCamZ = camera.position.z;
+      }
+    };
+    const onTouchMove = (e) => {
+      if (e.touches.length === 2 && initialPinchDist) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        const dist = Math.hypot(dx, dy);
+        const scale = initialPinchDist / dist;
+        camera.position.z = Math.max(8, Math.min(35, initialCamZ * scale));
+      }
+    };
+    const onTouchEnd = (e) => {
+      if (e.touches.length < 2) initialPinchDist = null;
+    };
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    el.addEventListener("touchend", onTouchEnd, { passive: true });
 
     // ── Animation loop ──
     let last = 0;
@@ -5572,7 +5651,30 @@ export default function App() {
       const dt = Math.min((ts - last) / 1000, 0.05);
       last = ts;
 
-      if (autoRot.current) globe.rotation.y += 0.0012;
+      if (targetCamZ.current !== null) {
+        camera.position.z += (targetCamZ.current - camera.position.z) * Math.min(1, dt * 5);
+        if (Math.abs(camera.position.z - targetCamZ.current) < 0.05) {
+          camera.position.z = targetCamZ.current;
+          targetCamZ.current = null;
+        }
+      }
+
+      if (targetRot.current !== null) {
+        let dy = targetRot.current.y - globe.rotation.y;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        
+        globe.rotation.y += dy * Math.min(1, dt * 5);
+        globe.rotation.x += (targetRot.current.x - globe.rotation.x) * Math.min(1, dt * 5);
+        
+        if (Math.abs(dy) < 0.01 && Math.abs(targetRot.current.x - globe.rotation.x) < 0.01) {
+          globe.rotation.y = targetRot.current.y;
+          globe.rotation.x = targetRot.current.x;
+          targetRot.current = null;
+        }
+      } else if (autoRot.current) {
+        globe.rotation.y += 0.0012;
+      }
 
       updateSunPosition();
 
@@ -5663,11 +5765,14 @@ export default function App() {
 
     return () => {
       cancelAnimationFrame(animRef.current);
-      el.removeEventListener("mousedown", onDown);
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      el.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
       el.removeEventListener("wheel", onWheel);
       window.removeEventListener("resize", onResize);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
       renderer.dispose();
       if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
       if (ts.parentNode) document.head.removeChild(ts);
@@ -5964,7 +6069,6 @@ export default function App() {
     }, recovery);
   };
 
-  const searchTimeoutRef = useRef(null);
 
   useEffect(() => {
     const t = setInterval(
@@ -6002,6 +6106,44 @@ export default function App() {
     );
   }, [searchTerm]);
 
+  useEffect(() => {
+    const handleNodeClick = (e) => {
+      const nodeId = e.detail;
+      const node = NODE_MAP[nodeId];
+      if (!node) return;
+      
+      if (globeRef.current) {
+        targetRot.current = {
+          x: node.lat * (Math.PI / 180),
+          y: -(node.lon + 90) * (Math.PI / 180)
+        };
+      }
+      
+      const W = window.innerWidth, H = window.innerHeight;
+      targetCamZ.current = W < H ? 18 : 12;
+      
+      const route = ROUTES.find(r => r.src === nodeId || r.dst === nodeId);
+      if (route) {
+        setSelRoute(route.id);
+        setSelNode(null);
+      } else {
+        setSelRoute(null);
+        setSelNode(nodeId);
+      }
+    };
+    const handleBgClick = () => {
+      setSelRoute(null);
+      setSelNode(null);
+    };
+    
+    window.addEventListener("globe-node-click", handleNodeClick);
+    window.addEventListener("globe-bg-click", handleBgClick);
+    return () => {
+      window.removeEventListener("globe-node-click", handleNodeClick);
+      window.removeEventListener("globe-bg-click", handleBgClick);
+    };
+  }, []);
+
   const handleSearchSelect = (nodeId) => {
     const node = NODE_MAP[nodeId];
     if (node && globeRef.current) {
@@ -6026,7 +6168,7 @@ export default function App() {
     <div
       style={{
         width: "100vw",
-        height: "100vh",
+        height: "100dvh",
         background: "#030b14",
         overflow: "hidden",
         fontFamily: "'Inter', sans-serif",
@@ -6061,11 +6203,141 @@ export default function App() {
           -webkit-background-clip: text;
           -webkit-text-fill-color: transparent;
         }
+
+        .modern-btn {
+          background: rgba(10, 15, 25, 0.4);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 30px;
+          padding: 8px 16px 8px 12px;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          cursor: pointer;
+          outline: none;
+          color: #fff;
+          font-family: 'Inter', sans-serif;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 1.5px;
+          transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .modern-btn:hover {
+          background: rgba(255, 255, 255, 0.1);
+          border-color: rgba(255, 255, 255, 0.2);
+        }
+        .modern-btn.active {
+          color: rgba(255,255,255,0.5);
+          box-shadow: none;
+        }
+        .modern-btn:not(.active) {
+          color: #00e5cc;
+          box-shadow: 0 0 20px rgba(0, 229, 204, 0.15);
+          border-color: rgba(0, 229, 204, 0.3);
+        }
+
+        /* Layout Classes */
+        .top-panel {
+          position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+          z-index: 20; padding: 8px 24px; display: flex; align-items: center;
+          justify-content: space-between; gap: 40px; width: 94%;
+          max-width: 1300px; border-radius: 24px;
+        }
+        .stats-container { display: flex; gap: 32px; align-items: center; }
+        .search-wrapper { position: relative; flex: 1; max-width: 360px; }
+        .left-panel {
+          position: absolute; top: 76px; left: 12px; bottom: 12px; width: 270px;
+          z-index: 10; display: flex; flex-direction: column; padding: 0; overflow: hidden;
+        }
+        .right-panel {
+          position: absolute; top: 76px; right: 12px; bottom: 12px; width: 270px;
+          z-index: 10; display: flex; flex-direction: column; padding: 0; overflow: hidden;
+        }
+        .bottom-panel {
+          position: absolute; bottom: 104px; left: 50%; transform: translateX(-50%);
+          padding: 28px; z-index: 30; min-width: 560px; max-width: 640px;
+        }
+        .bottom-panel-content {
+          display: flex; justify-content: space-between; align-items: flex-start;
+        }
+        .bottom-panel-stats { text-align: right; margin-left: 36px; flex-shrink: 0; }
+        .main-title { display: flex; align-items: center; gap: 16px; }
+
+        /* Responsive */
+        @media (max-width: 1200px) {
+          .top-panel { gap: 20px; }
+          .stats-container { gap: 16px; }
+        }
+        @media (max-width: 900px) {
+          .top-panel { flex-wrap: wrap; justify-content: center; top: 8px; }
+          .search-wrapper { order: 3; max-width: 100%; min-width: 100%; margin-top: 8px; }
+          .stats-container { width: 100%; justify-content: center; gap: 12px; }
+          .left-panel, .right-panel { top: 120px; width: 240px; }
+          .bottom-panel { bottom: 12px; min-width: 90%; padding: 16px; max-width: 96%; }
+        }
+        .mobile-menu-btn {
+          display: none;
+          background: transparent; border: none; color: #fff; cursor: pointer; outline: none;
+          padding: 8px; border-radius: 50%; transition: all 0.2s ease; margin-left: 8px;
+        }
+        .mobile-menu-btn:active { background: rgba(255,255,255,0.1); }
+        .mobile-back-btn { display: none !important; }
+        .side-panels-wrapper { display: contents; }
+
+        @media (max-width: 640px) {
+          .top-panel { width: calc(100% - 24px); flex-wrap: nowrap; padding: 10px 12px; border-radius: 16px; top: 12px; gap: 8px; justify-content: space-between; box-sizing: border-box; }
+          .top-panel.mobile-hidden { display: none !important; }
+          .main-title { width: auto; gap: 8px; justify-content: flex-start; flex: none; }
+          .main-title > div:last-child > div:last-child { display: none; }
+          .main-title .gradient-text { font-size: 14px !important; letter-spacing: 1px !important; }
+          .stats-container { display: none; }
+          .search-wrapper { max-width: none; min-width: 50px; margin-top: 0; flex: 1; order: 2; margin-left: 8px; }
+          .search-wrapper input { padding: 8px 12px !important; font-size: 12px !important; width: 100%; box-sizing: border-box; }
+          .search-wrapper > div:last-child { min-width: 200px; right: 0; left: auto !important; }
+          
+          .mobile-back-btn { display: inline-flex !important; }
+          .mobile-menu-btn { display: flex; align-items: center; justify-content: center; order: 3; margin-left: 0; flex: none; }
+          .side-panels-wrapper { display: none; }
+          .side-panels-wrapper.mobile-open ~ .bottom-panel { display: none !important; }
+          .side-panels-wrapper.mobile-open {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            position: fixed;
+            inset: 0;
+            top: 0;
+            bottom: 0;
+            z-index: 50;
+            background: rgba(3, 11, 20, 0.95);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            padding: 24px 16px 16px 16px;
+            overflow-y: auto;
+            animation: floatIn 0.3s ease;
+          }
+          .side-panels-wrapper.mobile-open .left-panel,
+          .side-panels-wrapper.mobile-open .right-panel {
+            display: none;
+            position: relative;
+            top: auto; left: auto; right: auto; bottom: auto;
+            width: 100%;
+            height: auto;
+            max-height: none;
+            overflow: visible;
+          }
+          .side-panels-wrapper.mobile-open.mode-bgp .left-panel { display: flex; }
+          .side-panels-wrapper.mobile-open.mode-latency .right-panel { display: flex; }
+
+          .bottom-panel { bottom: 12px; top: auto; transform: translateX(-50%); padding: 16px; width: 95%; min-width: 0; max-height: 40vh; overflow-y: auto; }
+          .bottom-panel-content { flex-direction: column; }
+          .bottom-panel-stats { margin-left: 0; margin-top: 16px; text-align: left; display: flex; flex-direction: row; gap: 16px; align-items: baseline; }
+        }
       `}</style>
 
       <div
         ref={mountRef}
-        style={{ position: "absolute", inset: 0, cursor: "grab" }}
+        style={{ position: "absolute", inset: 0, cursor: "grab", touchAction: "none" }}
       />
 
       <div
@@ -6079,25 +6351,8 @@ export default function App() {
         }}
       />
 
-      <div
-        className="glass-panel"
-        style={{
-          position: "absolute",
-          top: 12,
-          left: "50%",
-          transform: "translateX(-50%)",
-          zIndex: 20,
-          padding: "8px 24px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 40,
-          width: "94%",
-          maxWidth: 1300,
-          borderRadius: 24,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+      <div className={`glass-panel top-panel ${mobileViewMode !== "hidden" ? "mobile-hidden" : ""}`}>
+        <div className="main-title">
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             {[0, 1, 2].map((i) => (
               <div
@@ -6134,10 +6389,10 @@ export default function App() {
           </div>
         </div>
 
-        <div style={{ position: "relative", flex: 1, maxWidth: 360 }}>
+        <div className="search-wrapper">
           <input
             type="text"
-            placeholder="Search country or node..."
+            placeholder={window.innerWidth <= 640 ? "Search country" : "Search country or node..."}
             value={searchTerm}
             onChange={(e) => {
               if (searchTimeoutRef.current)
@@ -6228,17 +6483,12 @@ export default function App() {
           )}
         </div>
 
-        <div style={{ display: "flex", gap: 32, alignItems: "center" }}>
+        <div className="stats-container">
           {[
             ["NODES", NODES.length, "#00e5cc"],
             ["ROUTES", ROUTES.length, "#3b82f6"],
             ["PACKETS", totalRef.current.toLocaleString(), "#e2f1f8"],
             ["AVG RTT", `${avgLat}ms`, latStr(avgLat)],
-            [
-              "ANOMALIES",
-              anomCntRef.current,
-              anomCntRef.current > 0 ? "#f43f5e" : "rgba(255,255,255,0.3)",
-            ],
           ].map(([l, v, c]) => (
             <div key={l} style={{ textAlign: "right" }}>
               <div
@@ -6260,6 +6510,34 @@ export default function App() {
               </div>
             </div>
           ))}
+
+          <button
+            onClick={() => {
+              const next = !isAutoRotate;
+              setIsAutoRotate(next);
+              globalAutoRot.current = next;
+              autoRot.current = next;
+            }}
+            className={`modern-btn ${isAutoRotate ? 'active' : ''}`}
+            style={{ padding: "6px 12px", height: "min-content", fontSize: 11 }}
+            title={isAutoRotate ? "Pause Rotation" : "Resume Rotation"}
+          >
+            {isAutoRotate ? (
+              <>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+                </svg>
+                <span>PAUSE</span>
+              </>
+            ) : (
+              <>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ marginLeft: 2 }}>
+                  <path d="M8 5v14l11-7z"/>
+                </svg>
+                <span>ROTATE</span>
+              </>
+            )}
+          </button>
 
           <div
             style={{
@@ -6306,23 +6584,52 @@ export default function App() {
             </div>
           </div>
         </div>
+
+        <button 
+          className="mobile-menu-btn" 
+          onClick={() => setMobileViewMode(mobileViewMode === "hidden" ? "menu" : "hidden")}
+        >
+          {mobileViewMode !== "hidden" ? (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+               <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+            </svg>
+          ) : (
+             <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+               <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/>
+             </svg>
+          )}
+        </button>
       </div>
 
-      <div
-        className="glass-panel"
-        style={{
-          position: "absolute",
-          top: 76,
-          left: 12,
-          bottom: 12,
-          width: 270,
-          zIndex: 10,
-          display: "flex",
-          flexDirection: "column",
-          padding: "0",
-          overflow: "hidden",
-        }}
+
+
+      <div 
+        className={`side-panels-wrapper ${mobileViewMode !== "hidden" ? "mobile-open mode-" + mobileViewMode : ""}`}
+        onPointerDown={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
+        onTouchMove={(e) => e.stopPropagation()}
       >
+        {(mobileViewMode === "bgp" || mobileViewMode === "latency") && (
+          <div style={{ position: 'sticky', top: 0, zIndex: 10, background: 'rgba(3, 11, 20, 0.95)', paddingBottom: 16, borderBottom: '1px solid rgba(255,255,255,0.05)', marginBottom: 8 }}>
+            <button className="modern-btn mobile-back-btn" style={{ padding: '10px 20px', background: 'rgba(0,0,0,0.5)', width: 'max-content' }} onClick={() => setMobileViewMode("menu")}>
+               ← BACK TO MENU
+            </button>
+          </div>
+        )}
+        {mobileViewMode === "menu" && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 40, alignItems: 'center', width: '100%' }}>
+            <button className="modern-btn" style={{ padding: "16px 24px", fontSize: 13, width: '100%', justifyContent: 'center' }} onClick={() => setMobileViewMode("bgp")}>
+              SEE LIVE BGP EVENTS
+            </button>
+            <button className="modern-btn" style={{ padding: "16px 24px", fontSize: 13, width: '100%', justifyContent: 'center' }} onClick={() => setMobileViewMode("latency")}>
+              GLOBAL LATENCY MAP
+            </button>
+            <button className="modern-btn" style={{ padding: "16px 24px", fontSize: 13, width: '100%', justifyContent: 'center', background: 'rgba(255, 100, 100, 0.1)', color: '#ff6666', border: '1px solid rgba(255, 100, 100, 0.2)' }} onClick={() => setMobileViewMode("hidden")}>
+              CLOSE MENU
+            </button>
+          </div>
+        )}
+      <div className="glass-panel left-panel">
         <div
           style={{
             padding: "16px",
@@ -6446,10 +6753,32 @@ export default function App() {
             </div>
           ))}
         </div>
+
+      </div>
+
+      <div className="glass-panel right-panel">
+        <div
+          style={{
+            padding: "16px",
+            borderBottom: "1px solid rgba(255,255,255,0.08)",
+            background: "rgba(0,0,0,0.2)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 700,
+              letterSpacing: 2,
+              opacity: 0.9,
+            }}
+          >
+            GLOBAL LATENCY MAP
+          </div>
+        </div>
         <div
           className="glass-panel"
           style={{
-            margin: 12,
+            margin: "12px 12px 0 12px",
             padding: "16px 20px",
             border: "none",
             background: "rgba(0,0,0,0.3)",
@@ -6488,7 +6817,7 @@ export default function App() {
                     height: 10,
                     borderRadius: "50%",
                     background: c,
-                    boxShadow: `0 0 10px ${c}`,
+                    boxShadow: `0 0 8px ${c}`,
                   }}
                 />
                 <span
@@ -6499,41 +6828,6 @@ export default function App() {
                 </span>
               </div>
             ))}
-          </div>
-        </div>
-      </div>
-
-      <div
-        className="glass-panel"
-        style={{
-          position: "absolute",
-          top: 76,
-          right: 12,
-          bottom: 12,
-          width: 270,
-          zIndex: 10,
-          display: "flex",
-          flexDirection: "column",
-          padding: "0",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            padding: "16px",
-            borderBottom: "1px solid rgba(255,255,255,0.08)",
-            background: "rgba(0,0,0,0.2)",
-          }}
-        >
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 700,
-              letterSpacing: 2,
-              opacity: 0.9,
-            }}
-          >
-            GLOBAL LATENCY MAP
           </div>
           <div
             style={{
@@ -6639,29 +6933,12 @@ export default function App() {
                   : "● DISCONNECTED"}
         </div>
       </div>
+      </div>
 
       {/* ── SELECTED ROUTE: AS PATH PANEL ── */}
-      {selRoute && selRouteData && (
-        <div
-          className="glass-panel"
-          style={{
-            position: "absolute",
-            bottom: 104,
-            left: "50%",
-            transform: "translateX(-50%)",
-            padding: "28px",
-            zIndex: 30,
-            minWidth: 560,
-            maxWidth: 640,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-            }}
-          >
+      {selRoute && selRouteData ? (
+        <div className="glass-panel bottom-panel">
+          <div className="bottom-panel-content">
             <div style={{ flex: 1 }}>
               <div
                 style={{
@@ -6742,7 +7019,7 @@ export default function App() {
                 <LatencyChart routeId={selRoute} />
               </div>
             </div>
-            <div style={{ textAlign: "right", marginLeft: 36, flexShrink: 0 }}>
+            <div className="bottom-panel-stats">
               <div
                 className="data-font"
                 style={{
@@ -6799,7 +7076,66 @@ export default function App() {
             ✕
           </div>
         </div>
-      )}
+      ) : selNode ? (
+        <div className="glass-panel bottom-panel">
+          <div className="bottom-panel-content">
+            <div style={{ flex: 1 }}>
+              <div
+                style={{
+                  fontSize: 18,
+                  color: "#fff",
+                  fontWeight: 700,
+                  letterSpacing: 1,
+                  marginBottom: 4,
+                }}
+              >
+                {NODE_MAP[selNode]?.name}
+              </div>
+              <div
+                style={{
+                  fontSize: 12,
+                  opacity: 0.6,
+                  marginBottom: 10,
+                  letterSpacing: 0.5,
+                  fontWeight: 500,
+                }}
+              >
+                COUNTRY:{" "}
+                <span style={{ color: "#00e5cc" }}>{NODE_MAP[selNode]?.country}</span>{" "}
+              </div>
+              <div
+                style={{
+                  fontSize: 11,
+                  opacity: 0.5,
+                  letterSpacing: 1.5,
+                  fontFamily: "monospace",
+                  background: "rgba(255,255,255,0.05)",
+                  padding: "10px",
+                  borderRadius: "8px",
+                }}
+              >
+                ASN: {NODE_MAP[selNode]?.asn || "N/A"}
+              </div>
+            </div>
+          </div>
+          <div
+            onClick={() => setSelNode(null)}
+            style={{
+              position: "absolute",
+              top: 20,
+              right: 12,
+              cursor: "pointer",
+              opacity: 0.4,
+              fontSize: 20,
+              transition: "opacity 0.2s",
+            }}
+            onMouseEnter={(e) => (e.target.style.opacity = 1)}
+            onMouseLeave={(e) => (e.target.style.opacity = 0.4)}
+          >
+            ✕
+          </div>
+        </div>
+      ) : null}
 
       {/* ── NODE TOOLTIP ── */}
       {hoveredNodeId && NODE_MAP[hoveredNodeId] && (
