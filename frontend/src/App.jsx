@@ -6284,8 +6284,10 @@ export default function App() {
         .mobile-menu-btn:active { background: rgba(255,255,255,0.1); }
         .mobile-back-btn { display: none !important; }
         .side-panels-wrapper { display: contents; }
+        .mobile-only-rotate { display: none; }
 
         @media (max-width: 640px) {
+          .mobile-only-rotate { display: flex !important; align-items: center; justify-content: center; }
           .top-panel { width: calc(100% - 24px); flex-wrap: nowrap; padding: 10px 12px; border-radius: 16px; top: 12px; gap: 8px; justify-content: space-between; box-sizing: border-box; }
           .top-panel.mobile-hidden { display: none !important; }
           .main-title { width: auto; gap: 8px; justify-content: flex-start; flex: none; }
@@ -6601,7 +6603,37 @@ export default function App() {
         </button>
       </div>
 
-
+      {mobileViewMode === "hidden" && (
+        <button
+          onClick={() => {
+            const next = !isAutoRotate;
+            setIsAutoRotate(next);
+            globalAutoRot.current = next;
+            autoRot.current = next;
+          }}
+          className={`modern-btn mobile-only-rotate ${isAutoRotate ? 'active' : ''}`}
+          style={{
+            position: "absolute",
+            top: 76,
+            right: 16,
+            zIndex: 40,
+            padding: "10px",
+            borderRadius: "50%",
+            background: "rgba(0,0,0,0.5)",
+          }}
+          title={isAutoRotate ? "Pause Rotation" : "Resume Rotation"}
+        >
+          {isAutoRotate ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+            </svg>
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style={{ marginLeft: 2 }}>
+              <path d="M8 5v14l11-7z"/>
+            </svg>
+          )}
+        </button>
+      )}
 
       <div 
         className={`side-panels-wrapper ${mobileViewMode !== "hidden" ? "mobile-open mode-" + mobileViewMode : ""}`}
