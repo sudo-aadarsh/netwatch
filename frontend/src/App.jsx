@@ -5325,49 +5325,70 @@ export default function App() {
       sun.position.copy(sunPos);
     };
 
-    // ── Stars ──
-    {
-      const cnt = 3500;
-      const pos = new Float32Array(cnt * 3);
-      for (let i = 0; i < cnt; i++) {
-        const t = Math.random() * Math.PI * 2,
-          p = Math.acos(2 * Math.random() - 1),
-          r = 90 + Math.random() * 50;
-        pos[i * 3] = r * Math.sin(p) * Math.cos(t);
-        pos[i * 3 + 1] = r * Math.cos(p);
-        pos[i * 3 + 2] = r * Math.sin(p) * Math.sin(t);
-      }
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-      scene.add(
-        new THREE.Points(
-          geo,
-          new THREE.PointsMaterial({
-            color: 0xffffff,
-            size: 0.22,
-            transparent: true,
-            opacity: 0.65,
-          }),
-        ),
-      );
-    }
+
 
     // ── Globe group ──
     const globe = new THREE.Group();
     scene.add(globe);
     globeRef.current = globe;
 
+    const textureLoader = new THREE.TextureLoader();
+    const earthMap = textureLoader.load('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg');
+    const bumpMap = textureLoader.load('https://unpkg.com/three-globe/example/img/earth-topology.png');
+    const specularMap = textureLoader.load('https://unpkg.com/three-globe/example/img/earth-water.png');
+    const starsGroup = new THREE.Group();
+    const starSizes = [1.2, 2.0, 3.0]; 
+    const starCounts = [10000, 3000, 1000]; 
+
+    starSizes.forEach((size, index) => {
+      const geometry = new THREE.BufferGeometry();
+      const count = starCounts[index];
+      const positions = new Float32Array(count * 3);
+      const colors = new Float32Array(count * 3);
+      const color = new THREE.Color();
+      for (let i = 0; i < count; i++) {
+        const r = 150 + Math.random() * 50; 
+        const theta = 2 * Math.PI * Math.random();
+        const phi = Math.acos(2 * Math.random() - 1);
+        positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+        positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+        positions[i * 3 + 2] = r * Math.cos(phi);
+
+        const temp = Math.random();
+        if (temp < 0.2) color.setHSL(0.6, 0.8, 0.8); // pale blue
+        else if (temp < 0.4) color.setHSL(0.1, 0.8, 0.8); // pale orange
+        else color.setHSL(0, 0, 1); // white
+
+        colors[i * 3] = color.r;
+        colors[i * 3 + 1] = color.g;
+        colors[i * 3 + 2] = color.b;
+      }
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      const material = new THREE.PointsMaterial({
+        size: size,
+        transparent: true,
+        opacity: Math.random() * 0.3 + 0.7,
+        sizeAttenuation: false,
+        vertexColors: true
+      });
+      starsGroup.add(new THREE.Points(geometry, material));
+    });
+    globe.add(starsGroup);
+
     // Earth core
     globe.add(
       new THREE.Mesh(
         new THREE.SphereGeometry(R, 64, 64),
         new THREE.MeshPhongMaterial({
-          color: 0x052233,
-          emissive: 0x021019,
+          map: earthMap,
+          bumpMap: bumpMap,
+          bumpScale: 0.15,
+          specularMap: specularMap,
+          specular: new THREE.Color('grey'),
           shininess: 35,
-          specular: 0x003344,
-        }),
-      ),
+        })
+      )
     );
 
     // Atmosphere
