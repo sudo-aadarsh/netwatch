@@ -502,15 +502,15 @@ async def traceroute_loop():
 # ─── FastAPI app ──────────────────────────────────────────────────────────────
 
 async def keepalive_loop():
-    """Ping own endpoint every 36 hours to prevent sleeping (requires EXTERNAL_URL)."""
+    """Ping own endpoint every 15 minutes to prevent sleeping (requires EXTERNAL_URL)."""
     while True:
-        await asyncio.sleep(129600)  # 36 hours
+        await asyncio.sleep(900)  # 15 minutes
         try:
             port = int(os.getenv("PORT", 7860))
             # Fallback to localhost, but external URL is needed to reset external proxies
             url = os.getenv("EXTERNAL_URL", f"http://127.0.0.1:{port}")
-            if not url.endswith("/api/stats"):
-                url = url.rstrip("/") + "/api/stats"
+            if not url.endswith("/api/ping"):
+                url = url.rstrip("/") + "/api/ping"
                 
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as resp:
@@ -543,6 +543,12 @@ app.add_middleware(CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── REST endpoints ─────────────────────────────────────────────────────────────
+
+@app.get("/api/ping")
+def ping():
+    """Lightweight endpoint for uptime monitoring and keepalive scripts."""
+    return {"status": "alive"}
+
 
 @app.get("/api/routes")
 def get_routes():
