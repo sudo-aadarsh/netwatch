@@ -544,7 +544,7 @@ app.add_middleware(CORSMiddleware,
 
 # ── REST endpoints ─────────────────────────────────────────────────────────────
 
-@app.get("/api/ping")
+@app.api_route("/api/ping", methods=["GET", "HEAD"])
 def ping():
     """Lightweight endpoint for uptime monitoring and keepalive scripts."""
     return {"status": "alive"}
